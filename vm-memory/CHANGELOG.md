@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.18.0-msb.1
+
+### Added
+
+- Add `MmapRegion::new_on_numa_node` on Windows so callers can request a preferred physical NUMA node through `VirtualAlloc2`.
+
 ## 0.18.0
 
 ### Changed

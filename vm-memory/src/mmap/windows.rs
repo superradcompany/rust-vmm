@@ -11,6 +11,8 @@ use std::ptr::{null, null_mut};
 use libc::{c_void, size_t};
 
 use winapi::um::errhandlingapi::GetLastError;
+use winapi::um::libloaderapi::{GetModuleHandleA, GetProcAddress};
+use winapi::um::processthreadsapi::GetCurrentProcess;
 
 use crate::bitmap::{Bitmap, NewBitmap, BS};
 use crate::guest_memory::FileOffset;
@@ -51,9 +53,32 @@ extern "system" {
 const MM_HIGHEST_VAD_ADDRESS: u64 = 0x000007FFFFFDFFFF;
 
 const MEM_COMMIT: u32 = 0x00001000;
+const MEM_RESERVE: u32 = 0x00002000;
 const MEM_RELEASE: u32 = 0x00008000;
 const FILE_MAP_ALL_ACCESS: u32 = 0xf001f;
 const PAGE_READWRITE: u32 = 0x04;
+const MEM_EXTENDED_PARAMETER_NUMA_NODE: u64 = 2;
+
+type VirtualAlloc2Fn = unsafe extern "system" fn(
+    process: RawHandle,
+    base_address: *mut c_void,
+    size: size_t,
+    allocation_type: u32,
+    page_protection: u32,
+    extended_parameters: *mut MemExtendedParameter,
+    parameter_count: u32,
+) -> *mut c_void;
+
+/// ABI-compatible representation of the Windows `MEM_EXTENDED_PARAMETER` structure.
+///
+/// Both the type/reserved bitfield and its value union occupy one 64-bit word. The NUMA-node
+/// parameter stores the parameter type in the low bits of the first word and the preferred node
+/// number in the second word.
+#[repr(C)]
+struct MemExtendedParameter {
+    type_and_reserved: u64,
+    value: u64,
+}
 
 pub const MAP_FAILED: *mut c_void = null_mut::<c_void>();
 pub const INVALID_HANDLE_VALUE: RawHandle = (-1isize) as RawHandle;
@@ -101,6 +126,49 @@ impl<B: NewBitmap> MmapRegion<B> {
         }
         Ok(Self {
             addr: addr as *mut u8,
+            size,
+            bitmap: B::with_len(size),
+            file_offset: None,
+        })
+    }
+
+    /// Creates an anonymous mapping whose physical pages prefer `node` when first accessed.
+    ///
+    /// Windows treats the NUMA node as a preference rather than a strict binding. The virtual range
+    /// is reserved and committed up front, while physical pages remain demand-faulted according to
+    /// the operating system's ordinary committed-memory behavior.
+    ///
+    /// Returns [`io::ErrorKind::Unsupported`] when the host does not export `VirtualAlloc2`.
+    pub fn new_on_numa_node(size: usize, node: u32) -> io::Result<Self> {
+        if (size == 0) || (size > MM_HIGHEST_VAD_ADDRESS as usize) {
+            return Err(io::Error::from_raw_os_error(libc::EINVAL));
+        }
+
+        let virtual_alloc2 = resolve_virtual_alloc2()?;
+        let mut numa_parameter = MemExtendedParameter {
+            type_and_reserved: MEM_EXTENDED_PARAMETER_NUMA_NODE,
+            value: u64::from(node),
+        };
+
+        // `VirtualAlloc2` owns the returned allocation exactly like `VirtualAlloc`, so the existing
+        // `Drop` implementation can release both constructor paths with `VirtualFree`.
+        let addr = unsafe {
+            virtual_alloc2(
+                GetCurrentProcess() as RawHandle,
+                null_mut(),
+                size,
+                MEM_RESERVE | MEM_COMMIT,
+                PAGE_READWRITE,
+                &mut numa_parameter,
+                1,
+            )
+        };
+        if addr == MAP_FAILED {
+            return Err(io::Error::last_os_error());
+        }
+
+        Ok(Self {
+            addr: addr.cast::<u8>(),
             size,
             bitmap: B::with_len(size),
             file_offset: None,
@@ -161,6 +229,32 @@ impl<B: NewBitmap> MmapRegion<B> {
             file_offset: Some(file_offset),
         })
     }
+}
+
+fn resolve_virtual_alloc2() -> io::Result<VirtualAlloc2Fn> {
+    // Resolve dynamically so binaries using the ordinary constructor retain their existing host
+    // compatibility and a managed NUMA request can fail with a regular capability error.
+    // The SDK documents Kernel32, while current Windows hosts implement the forwarded export in
+    // KernelBase. Probe both so this also works on hosts where GetProcAddress does not expose the
+    // forwarder from Kernel32.
+    for module_name in [b"kernelbase.dll\0".as_slice(), b"kernel32.dll\0".as_slice()] {
+        let module = unsafe { GetModuleHandleA(module_name.as_ptr().cast()) };
+        if module.is_null() {
+            continue;
+        }
+
+        let procedure = unsafe { GetProcAddress(module, b"VirtualAlloc2\0".as_ptr().cast()) };
+        if !procedure.is_null() {
+            // `GetProcAddress` erases the signature. The symbol is accepted only under the
+            // documented `VirtualAlloc2` name, whose ABI is fixed by memoryapi.h.
+            return Ok(unsafe { std::mem::transmute::<_, VirtualAlloc2Fn>(procedure) });
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "VirtualAlloc2 is unavailable on this Windows host",
+    ))
 }
 
 impl<B: Bitmap> MmapRegion<B> {
@@ -258,6 +352,27 @@ mod tests {
         let file_offset = FileOffset::new(file, 0);
         let e = MmapRegion::from_file(file_offset, 1024).unwrap_err();
         assert_eq!(e.raw_os_error(), Some(libc::EBADF));
+    }
+
+    #[test]
+    fn map_on_numa_node_rejects_invalid_sizes() {
+        assert_eq!(
+            MmapRegion::new_on_numa_node(0, 0)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::EINVAL)
+        );
+    }
+
+    #[test]
+    fn map_on_numa_node_allocates_accessible_memory() {
+        let mapping = MmapRegion::new_on_numa_node(0x1_0000, 0).unwrap();
+        assert_eq!(mapping.size(), 0x1_0000);
+
+        unsafe {
+            mapping.as_ptr().write_volatile(0x5a);
+            assert_eq!(mapping.as_ptr().read_volatile(), 0x5a);
+        }
     }
 
     #[test]

@@ -1,15 +1,18 @@
 [package]
-name = "vm-memory"
-version = "0.18.0"
+name = "msb-vm-memory"
+version = "0.18.0-msb.1"
 description = "Safe abstractions for accessing the VM physical memory"
 keywords = ["memory"]
 categories = ["memory-management"]
 authors = ["Liu Jiang <gerry@linux.alibaba.com>"]
-repository.workspace = true
+repository = "https://github.com/superradcompany/rust-vmm"
 readme = "README.md"
 license = "Apache-2.0 OR BSD-3-Clause"
 edition = "2021"
 autobenches = false
+
+[lib]
+name = "vm_memory"
 
 [features]
 default = ["rawfd"]
@@ -30,7 +33,7 @@ vmm-sys-util = { path = "../vmm-sys-util", version = ">=0.12.1, <=0.15.0", optio
 
 [target.'cfg(target_family = "windows")'.dependencies.winapi]
 version = "0.3"
-features = ["errhandlingapi", "sysinfoapi"]
+features = ["errhandlingapi", "libloaderapi", "processthreadsapi", "sysinfoapi"]
 optional = true
 
 [dev-dependencies]
