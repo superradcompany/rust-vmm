@@ -1,7 +1,6 @@
-# vm-memory
+# msb-vm-memory
 
-[![crates.io](https://img.shields.io/crates/v/vm-memory)](https://crates.io/crates/vm-memory)
-[![docs.rs](https://img.shields.io/docsrs/vm-memory)](https://docs.rs/vm-memory/)
+`msb-vm-memory` is Microsandbox's compatibility fork of the rust-vmm `vm-memory` crate. It keeps the `vm_memory` library API and adds the host allocation features needed by Microsandbox while those changes make their way upstream.
 
 ## Design
 
@@ -50,14 +49,14 @@ Xen is only supported for Unix platforms.
 
 ## Usage
 
-Add `vm-memory` as a dependency in `Cargo.toml`
+Alias `msb-vm-memory` as `vm-memory` in `Cargo.toml` to preserve the existing Rust import path:
 
 ```toml
 [dependencies]
-vm-memory = "*"
+vm-memory = { package = "msb-vm-memory", version = "0.18.0-msb.1" }
 ```
 
-Then add `extern crate vm-memory;` to your crate root.
+Code continues to import the crate as `vm_memory`.
 
 ## Examples
 
